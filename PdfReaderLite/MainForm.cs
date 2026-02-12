@@ -688,32 +688,8 @@ public sealed class MainForm : Form
         {
             Document = printDocument,
             AllowSomePages = true,
-            UseEXDialog = true
+            UseEXDialog = false
         };
-
-        using var previewDialog = new PrintPreviewDialog
-        {
-            Document = printDocument,
-            Width = 1100,
-            Height = 800,
-            StartPosition = FormStartPosition.CenterParent,
-            UseAntiAlias = true
-        };
-
-        previewDialog.ShowDialog(this);
-
-        var shouldPrint = MessageBox.Show(
-            this,
-            "Deseja imprimir este documento?",
-            AppTitle,
-            MessageBoxButtons.YesNo,
-            MessageBoxIcon.Question
-        );
-
-        if (shouldPrint != DialogResult.Yes)
-        {
-            return;
-        }
 
         if (printDialog.ShowDialog(this) != DialogResult.OK)
         {
@@ -722,7 +698,6 @@ public sealed class MainForm : Form
 
         try
         {
-            printDocument.DefaultPageSettings.Color = true;
             printDocument.Print();
         }
         catch (Exception ex)
