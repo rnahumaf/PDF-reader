@@ -1,0 +1,14 @@
+# Build outputs
+bin/
+obj/
+publish/
+dist/
+
+# User-specific files
+*.user
+*.suo
+*.userprefs
+
+# IDE
+.vs/
+.vscode/
