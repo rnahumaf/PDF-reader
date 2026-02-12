@@ -10,12 +10,16 @@ Leitor de PDF ultra lightweight e minimalista para Windows, com foco total no co
 - Navegacao de paginas (anterior/proxima, digitar pagina e miniaturas com selecao direta)
 - Zoom auto-ajustavel (`Ajustar largura` e `Ajustar pagina`) e manual (`+`, `-`, percentuais)
 - Impressao com dialogo nativo do Windows
+- Modo `Formulario` para preencher campos de PDFs interativos
+- PDFs com formulario sao detectados e abertos automaticamente em modo `Formulario`
+- No modo `Formulario`, use a barra nativa do visualizador para navegar/imprimir/salvar
 - Interface discreta, sem abas largas e sem distracoes
 
 ## Atalhos
 
 - `Ctrl+O`: abrir arquivo
 - `Ctrl+P`: imprimir
+- `Ctrl+E`: alternar modo formulario (preenchimento de campos)
 - `Ctrl++`: zoom in
 - `Ctrl+-`: zoom out
 - `Ctrl+0`: ajustar pagina
@@ -27,6 +31,7 @@ Leitor de PDF ultra lightweight e minimalista para Windows, com foco total no co
 Pre-requisitos:
 
 - .NET SDK 8.0+
+- Microsoft Edge WebView2 Runtime (para o modo de formulario)
 
 Comandos:
 

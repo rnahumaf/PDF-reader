@@ -1,11 +1,20 @@
 using System.Drawing.Drawing2D;
 using System.Globalization;
+using System.Text;
+using Microsoft.Web.WebView2.WinForms;
 using PdfiumViewer;
 
 namespace PdfReaderLite;
 
 public sealed class MainForm : Form
 {
+    private enum PdfFormHint
+    {
+        None,
+        AcroForm,
+        Xfa
+    }
+
     private const int ThumbnailWidth = 130;
     private const int ThumbnailHeight = 180;
     private const string AppTitle = "PDF Reader Lite";
@@ -20,11 +29,13 @@ public sealed class MainForm : Form
     private ToolStripComboBox _zoomComboBox = null!;
     private ToolStripButton _zoomInButton = null!;
     private ToolStripButton _printButton = null!;
+    private ToolStripButton _formFillButton = null!;
 
     private readonly SplitContainer _layoutContainer;
     private readonly ListView _thumbnailListView;
     private readonly ImageList _thumbnailImageList;
     private readonly PdfViewer _pdfViewer;
+    private readonly WebView2 _formWebView;
 
     private readonly Queue<int> _thumbnailRenderQueue = new();
     private readonly System.Windows.Forms.Timer _thumbnailRenderTimer;
@@ -33,6 +44,12 @@ public sealed class MainForm : Form
     private PdfDocument? _document;
     private string? _loadedFilePath;
     private bool _syncingUi;
+    private bool _isFormFillMode;
+    private bool _isSwitchingFormMode;
+    private bool _previewWasVisibleBeforeFormMode = true;
+    private bool _formFillHintShown;
+    private bool _xfaCompatibilityHintShown;
+    private PdfFormHint _currentDocumentFormHint = PdfFormHint.None;
 
     public MainForm(string? startupPath)
     {
@@ -49,8 +66,10 @@ public sealed class MainForm : Form
         _thumbnailImageList = BuildThumbnailImageList();
         _thumbnailListView = BuildThumbnailListView();
         _pdfViewer = BuildPdfViewer();
+        _formWebView = BuildFormWebView();
 
         _layoutContainer.Panel1.Controls.Add(_thumbnailListView);
+        _layoutContainer.Panel2.Controls.Add(_formWebView);
         _layoutContainer.Panel2.Controls.Add(_pdfViewer);
 
         Controls.Add(_layoutContainer);
@@ -84,6 +103,7 @@ public sealed class MainForm : Form
             _pdfViewer.Document = null;
             _document?.Dispose();
             _document = null;
+            _formWebView.Dispose();
 
             DisposeThumbnailImages();
         }
@@ -99,8 +119,20 @@ public sealed class MainForm : Form
                 OpenDocumentFromDialog();
                 return true;
             case Keys.Control | Keys.P:
-                PrintCurrentDocument();
+                _ = PrintCurrentDocumentAsync();
                 return true;
+            case Keys.Control | Keys.E:
+                _ = ToggleFormFillModeFromShortcutAsync();
+                return true;
+        }
+
+        if (_isFormFillMode)
+        {
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        switch (keyData)
+        {
             case Keys.Control | Keys.Oemplus:
             case Keys.Control | Keys.Add:
                 ZoomIn();
@@ -147,6 +179,8 @@ public sealed class MainForm : Form
         };
 
         _openButton = CreateTextButton("Abrir", "Ctrl+O");
+        _formFillButton = CreateTextButton("Formulario", "Ctrl+E");
+        _formFillButton.CheckOnClick = true;
         _togglePreviewButton = CreateTextButton("Preview", "Mostrar/Ocultar miniaturas");
         _togglePreviewButton.CheckOnClick = true;
         _togglePreviewButton.Checked = true;
@@ -187,6 +221,8 @@ public sealed class MainForm : Form
         toolbar.Items.AddRange(
         [
             _openButton,
+            new ToolStripSeparator(),
+            _formFillButton,
             new ToolStripSeparator(),
             _togglePreviewButton,
             new ToolStripSeparator(),
@@ -267,15 +303,25 @@ public sealed class MainForm : Form
         return viewer;
     }
 
+    private static WebView2 BuildFormWebView()
+    {
+        return new WebView2
+        {
+            Dock = DockStyle.Fill,
+            Visible = false
+        };
+    }
+
     private void HookEvents()
     {
         _openButton.Click += (_, _) => OpenDocumentFromDialog();
+        _formFillButton.Click += async (_, _) => await ToggleFormFillModeAsync();
         _togglePreviewButton.Click += (_, _) => TogglePreviewPanel();
         _previousPageButton.Click += (_, _) => GoToPage((_pdfViewer.Document == null ? 1 : _pdfViewer.Renderer.Page + 1) - 1);
         _nextPageButton.Click += (_, _) => GoToPage((_pdfViewer.Document == null ? 1 : _pdfViewer.Renderer.Page + 1) + 1);
         _zoomOutButton.Click += (_, _) => ZoomOut();
         _zoomInButton.Click += (_, _) => ZoomIn();
-        _printButton.Click += (_, _) => PrintCurrentDocument();
+        _printButton.Click += async (_, _) => await PrintCurrentDocumentAsync();
 
         _pageTextBox.KeyDown += PageTextBoxOnKeyDown;
         _pageTextBox.Leave += (_, _) => GoToTypedPage();
@@ -377,6 +423,7 @@ public sealed class MainForm : Form
 
         _loadedFilePath = normalizedPath;
         Text = $"{Path.GetFileName(normalizedPath)} - {AppTitle}";
+        _currentDocumentFormHint = DetectFormHint(normalizedPath);
 
         if (_document.PageCount > 0)
         {
@@ -385,6 +432,16 @@ public sealed class MainForm : Form
         }
 
         RebuildThumbnailList();
+
+        if (_isFormFillMode)
+        {
+            _ = ReloadFormModeDocumentAsync();
+        }
+        else
+        {
+            _ = AutoEnableFormFillModeIfNeededAsync();
+        }
+
         UpdateViewState(force: true);
     }
 
@@ -532,7 +589,7 @@ public sealed class MainForm : Form
 
     private void GoToPage(int pageNumber)
     {
-        if (_document == null || _document.PageCount == 0)
+        if (_isFormFillMode || _document == null || _document.PageCount == 0)
         {
             return;
         }
@@ -582,7 +639,7 @@ public sealed class MainForm : Form
 
     private void ApplyZoomFromComboBox()
     {
-        if (_document == null || _syncingUi)
+        if (_isFormFillMode || _document == null || _syncingUi)
         {
             return;
         }
@@ -613,7 +670,7 @@ public sealed class MainForm : Form
 
     private void SetZoomMode(PdfViewerZoomMode mode)
     {
-        if (_document == null)
+        if (_isFormFillMode || _document == null)
         {
             return;
         }
@@ -629,7 +686,7 @@ public sealed class MainForm : Form
 
     private void ZoomIn()
     {
-        if (_document == null)
+        if (_isFormFillMode || _document == null)
         {
             return;
         }
@@ -640,7 +697,7 @@ public sealed class MainForm : Form
 
     private void ZoomOut()
     {
-        if (_document == null)
+        if (_isFormFillMode || _document == null)
         {
             return;
         }
@@ -670,14 +727,27 @@ public sealed class MainForm : Form
 
     private void TogglePreviewPanel()
     {
+        if (_isFormFillMode)
+        {
+            _togglePreviewButton.Checked = false;
+            _layoutContainer.Panel1Collapsed = true;
+            return;
+        }
+
         var showPreview = _togglePreviewButton.Checked;
         _layoutContainer.Panel1Collapsed = !showPreview;
     }
 
-    private void PrintCurrentDocument()
+    private async Task PrintCurrentDocumentAsync()
     {
         if (_document == null)
         {
+            return;
+        }
+
+        if (_isFormFillMode)
+        {
+            await PrintFromFormWebViewAsync();
             return;
         }
 
@@ -706,8 +776,274 @@ public sealed class MainForm : Form
         }
     }
 
+    private async Task PrintFromFormWebViewAsync()
+    {
+        if (!await EnsureFormWebViewReadyAsync() || _formWebView.CoreWebView2 == null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _formWebView.CoreWebView2.ExecuteScriptAsync("window.print();");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Falha ao imprimir no modo de formulario.\n\n{ex.Message}", AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private async Task ToggleFormFillModeFromShortcutAsync()
+    {
+        if (_document == null)
+        {
+            return;
+        }
+
+        _formFillButton.Checked = !_formFillButton.Checked;
+        await ToggleFormFillModeAsync();
+    }
+
+    private async Task ToggleFormFillModeAsync()
+    {
+        if (_isSwitchingFormMode)
+        {
+            return;
+        }
+
+        _isSwitchingFormMode = true;
+
+        try
+        {
+            if (!_formFillButton.Checked)
+            {
+                ExitFormFillMode();
+                return;
+            }
+
+            if (_document == null)
+            {
+                _formFillButton.Checked = false;
+                return;
+            }
+
+            if (!await LoadCurrentDocumentInFormModeAsync())
+            {
+                _formFillButton.Checked = false;
+                ExitFormFillMode();
+                return;
+            }
+
+            EnterFormFillMode();
+        }
+        finally
+        {
+            _isSwitchingFormMode = false;
+        }
+    }
+
+    private void EnterFormFillMode()
+    {
+        if (_isFormFillMode)
+        {
+            return;
+        }
+
+        _isFormFillMode = true;
+        _previewWasVisibleBeforeFormMode = _togglePreviewButton.Checked;
+        _togglePreviewButton.Checked = false;
+        _layoutContainer.Panel1Collapsed = true;
+        _thumbnailListView.Enabled = false;
+
+        _pdfViewer.Visible = false;
+        _formWebView.Visible = true;
+        _formWebView.BringToFront();
+        _formWebView.Focus();
+
+        if (!_formFillHintShown)
+        {
+            _formFillHintShown = true;
+            MessageBox.Show(
+                this,
+                "Modo de formulario ativo.\nUse a barra nativa do visualizador para salvar o PDF preenchido.",
+                AppTitle,
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information
+            );
+        }
+
+        if (_currentDocumentFormHint == PdfFormHint.Xfa && !_xfaCompatibilityHintShown)
+        {
+            _xfaCompatibilityHintShown = true;
+            MessageBox.Show(
+                this,
+                "Este PDF usa formulario XFA. Alguns arquivos XFA podem abrir apenas em modo leitura no motor do Edge/WebView2.\nSe os campos seguirem bloqueados, abra no Adobe Acrobat Reader.",
+                AppTitle,
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning
+            );
+        }
+
+        UpdateViewState(force: true);
+    }
+
+    private void ExitFormFillMode()
+    {
+        if (!_isFormFillMode)
+        {
+            return;
+        }
+
+        _isFormFillMode = false;
+        _thumbnailListView.Enabled = true;
+
+        _formWebView.Visible = false;
+        _pdfViewer.Visible = true;
+        _pdfViewer.BringToFront();
+        _pdfViewer.Focus();
+
+        _togglePreviewButton.Checked = _previewWasVisibleBeforeFormMode;
+        _layoutContainer.Panel1Collapsed = !_previewWasVisibleBeforeFormMode;
+
+        UpdateViewState(force: true);
+    }
+
+    private async Task<bool> LoadCurrentDocumentInFormModeAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_loadedFilePath))
+        {
+            return false;
+        }
+
+        if (!await EnsureFormWebViewReadyAsync() || _formWebView.CoreWebView2 == null)
+        {
+            return false;
+        }
+
+        var currentPage = _pdfViewer.Document == null ? 1 : _pdfViewer.Renderer.Page + 1;
+
+        try
+        {
+            _formWebView.CoreWebView2.Navigate(BuildDocumentViewerUrl(currentPage));
+            return true;
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Nao foi possivel abrir o modo de formulario.\n\n{ex.Message}", AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
+    }
+
+    private async Task AutoEnableFormFillModeIfNeededAsync()
+    {
+        if (_document == null || _isFormFillMode || _currentDocumentFormHint == PdfFormHint.None)
+        {
+            return;
+        }
+
+        _formFillButton.Checked = true;
+        await ToggleFormFillModeAsync();
+    }
+
+    private async Task ReloadFormModeDocumentAsync()
+    {
+        if (await LoadCurrentDocumentInFormModeAsync())
+        {
+            return;
+        }
+
+        _formFillButton.Checked = false;
+        ExitFormFillMode();
+    }
+
+    private async Task<bool> EnsureFormWebViewReadyAsync()
+    {
+        if (_formWebView.CoreWebView2 != null)
+        {
+            return true;
+        }
+
+        try
+        {
+            UseWaitCursor = true;
+            await _formWebView.EnsureCoreWebView2Async();
+
+            if (_formWebView.CoreWebView2 != null)
+            {
+                _formWebView.CoreWebView2.Settings.AreDevToolsEnabled = false;
+            }
+
+            return _formWebView.CoreWebView2 != null;
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                this,
+                "Nao foi possivel iniciar o modo de formulario.\nInstale/atualize o Microsoft Edge WebView2 Runtime.\n\n" + ex.Message,
+                AppTitle,
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning
+            );
+            return false;
+        }
+        finally
+        {
+            UseWaitCursor = false;
+        }
+    }
+
+    private string BuildDocumentViewerUrl(int pageNumber)
+    {
+        var documentUri = new Uri(_loadedFilePath!);
+        var page = Math.Max(1, pageNumber);
+        var builder = new UriBuilder(documentUri)
+        {
+            Fragment = $"page={page}"
+        };
+
+        return builder.Uri.AbsoluteUri;
+    }
+
+    private static PdfFormHint DetectFormHint(string filePath)
+    {
+        const int maxBytesToScan = 2 * 1024 * 1024;
+
+        try
+        {
+            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            var bytesToRead = (int)Math.Min(stream.Length, maxBytesToScan);
+            if (bytesToRead <= 0)
+            {
+                return PdfFormHint.None;
+            }
+
+            var buffer = new byte[bytesToRead];
+            _ = stream.Read(buffer, 0, bytesToRead);
+
+            var text = Encoding.ASCII.GetString(buffer);
+            if (text.Contains("/XFA", StringComparison.Ordinal))
+            {
+                return PdfFormHint.Xfa;
+            }
+
+            if (text.Contains("/AcroForm", StringComparison.Ordinal))
+            {
+                return PdfFormHint.AcroForm;
+            }
+        }
+        catch
+        {
+            // If probing fails, keep default reader mode.
+        }
+
+        return PdfFormHint.None;
+    }
+
     private void ApplyEmptyState()
     {
+        _formFillButton.Checked = false;
+        ExitFormFillMode();
+
         _syncingUi = true;
         _pageTextBox.Text = "0";
         _pageCountLabel.Text = "/ 0";
@@ -722,6 +1058,8 @@ public sealed class MainForm : Form
         _zoomComboBox.Enabled = false;
         _togglePreviewButton.Enabled = false;
         _printButton.Enabled = false;
+        _formFillButton.Enabled = false;
+        _thumbnailListView.Enabled = false;
     }
 
     private void UpdateViewState(bool force = false)
@@ -743,22 +1081,24 @@ public sealed class MainForm : Form
         _syncingUi = true;
         _pageTextBox.Text = page.ToString(CultureInfo.InvariantCulture);
         _pageCountLabel.Text = $"/ {_document.PageCount}";
-        _zoomComboBox.Text = $"{zoomPercent}%";
+        _zoomComboBox.Text = _isFormFillMode ? "Modo formulario" : $"{zoomPercent}%";
         _syncingUi = false;
 
-        if (force || _thumbnailListView.SelectedIndices.Count == 0 || _thumbnailListView.SelectedIndices[0] != page - 1)
+        if (!_isFormFillMode && (force || _thumbnailListView.SelectedIndices.Count == 0 || _thumbnailListView.SelectedIndices[0] != page - 1))
         {
             SelectThumbnail(page - 1);
         }
 
-        _previousPageButton.Enabled = page > 1;
-        _nextPageButton.Enabled = page < _document.PageCount;
-        _pageTextBox.Enabled = true;
-        _zoomOutButton.Enabled = true;
-        _zoomInButton.Enabled = true;
-        _zoomComboBox.Enabled = true;
-        _togglePreviewButton.Enabled = true;
+        _previousPageButton.Enabled = !_isFormFillMode && page > 1;
+        _nextPageButton.Enabled = !_isFormFillMode && page < _document.PageCount;
+        _pageTextBox.Enabled = !_isFormFillMode;
+        _zoomOutButton.Enabled = !_isFormFillMode;
+        _zoomInButton.Enabled = !_isFormFillMode;
+        _zoomComboBox.Enabled = !_isFormFillMode;
+        _togglePreviewButton.Enabled = !_isFormFillMode;
         _printButton.Enabled = true;
+        _formFillButton.Enabled = true;
+        _thumbnailListView.Enabled = !_isFormFillMode;
     }
 
     private void SelectThumbnail(int pageIndex)

@@ -1,5 +1,5 @@
 #define MyAppName "PDF Reader Lite"
-#define MyAppVersion "0.1.2"
+#define MyAppVersion "0.1.3"
 #define MyAppPublisher "PDF Reader Lite"
 #define MyAppExeName "PdfReaderLite.exe"
 #define MyAppAssocName "PDF Reader Lite Document"
