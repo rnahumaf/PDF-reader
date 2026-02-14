@@ -4,27 +4,22 @@ Leitor de PDF ultra lightweight e minimalista para Windows, com foco total no co
 
 ## Funcionalidades atuais (MVP)
 
-- Abertura de PDF por botao `Abrir`
+- Abertura de PDF por atalho `Ctrl+O`
 - Abertura por arrastar e soltar
 - Abertura por argumento de linha de comando (duplo clique em `.pdf` via associacao)
-- Navegacao de paginas (anterior/proxima, digitar pagina e miniaturas com selecao direta)
-- Zoom auto-ajustavel (`Ajustar largura` e `Ajustar pagina`) e manual (`+`, `-`, percentuais)
-- Impressao com dialogo nativo do Windows
-- Modo `Formulario` para preencher campos de PDFs interativos
-- PDFs com formulario sao detectados e abertos automaticamente em modo `Formulario`
-- No modo `Formulario`, use a barra nativa do visualizador para navegar/imprimir/salvar
-- Interface discreta, sem abas largas e sem distracoes
+- Visualizacao nativa do PDF via Edge/WebView2, com barra propria (navegacao, zoom, sumario, imprimir e fullscreen)
+- Formulario interativo (AcroForm/XFA quando suportado pelo motor do Edge/WebView2)
+- Impressao pelo proprio visualizador nativo
+- Botao `Tela cheia` do app (F11), evitando o bug do fullscreen nativo do viewer
+- Interface focada no documento, sem barra manual de navegacao
 
 ## Atalhos
 
 - `Ctrl+O`: abrir arquivo
 - `Ctrl+P`: imprimir
-- `Ctrl+E`: alternar modo formulario (preenchimento de campos)
-- `Ctrl++`: zoom in
-- `Ctrl+-`: zoom out
-- `Ctrl+0`: ajustar pagina
-- `Ctrl+1`: ajustar largura
-- `PgUp` / `PgDn`: pagina anterior/proxima
+- `F11`: alternar tela cheia do app
+
+Os atalhos de navegacao/zoom do documento continuam os nativos do visualizador PDF embutido.
 
 ## Desenvolvimento local
 
@@ -62,12 +57,10 @@ Gerar instalador:
 
 Saida: `dist/PDFReaderLite-Setup-<versao>.exe`
 
-Observacao: `build-installer.ps1` executa o publish automaticamente antes de compilar o instalador.
-Se voce ja tiver publicado e quiser pular essa etapa:
+Observacoes:
 
-```powershell
-.\scripts\build-installer.ps1 -SkipPublish
-```
+- `build-installer.ps1` incrementa automaticamente a versao do app a cada execucao.
+- O script executa publish antes de compilar o instalador para manter o executavel e o instalador com a mesma versao.
 
 ## Associacao como leitor de PDF no Windows
 

@@ -1,5 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
-
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
@@ -9,19 +8,17 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationIcon>..\assets\PdfReaderLite.ico</ApplicationIcon>
-    <Version>0.1.3</Version>
-    <AssemblyVersion>0.1.3.0</AssemblyVersion>
-    <FileVersion>0.1.3.0</FileVersion>
+    <Version>0.1.5</Version>
+    <AssemblyVersion>0.1.5.0</AssemblyVersion>
+    <FileVersion>0.1.5.0</FileVersion>
     <NoWarn>$(NoWarn);NU1701</NoWarn>
     <WebView2PackageVersion>1.0.3405.78</WebView2PackageVersion>
   </PropertyGroup>
-
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="$(WebView2PackageVersion)" ExcludeAssets="build;buildTransitive" />
     <PackageReference Include="PdfiumViewer" Version="2.13.0" />
     <PackageReference Include="PdfiumViewer.Native.x86_64.v8-xfa" Version="2018.4.8.256" />
   </ItemGroup>
-
   <ItemGroup>
     <Reference Include="Microsoft.Web.WebView2.Core">
       <HintPath>$(NuGetPackageRoot)microsoft.web.webview2\$(WebView2PackageVersion)\lib_manual\netcoreapp3.0\Microsoft.Web.WebView2.Core.dll</HintPath>
@@ -32,7 +29,6 @@
       <Private>true</Private>
     </Reference>
   </ItemGroup>
-
   <ItemGroup>
     <Content Include="$(NuGetPackageRoot)microsoft.web.webview2\$(WebView2PackageVersion)\runtimes\win-x64\native\WebView2Loader.dll">
       <Link>runtimes\win-x64\native\WebView2Loader.dll</Link>
@@ -40,5 +36,4 @@
       <Visible>false</Visible>
     </Content>
   </ItemGroup>
-
 </Project>

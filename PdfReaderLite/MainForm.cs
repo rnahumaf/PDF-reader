@@ -1,6 +1,7 @@
 using System.Drawing.Drawing2D;
 using System.Globalization;
 using System.Text;
+using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 using PdfiumViewer;
 
@@ -36,6 +37,10 @@ public sealed class MainForm : Form
     private readonly ImageList _thumbnailImageList;
     private readonly PdfViewer _pdfViewer;
     private readonly WebView2 _formWebView;
+    private readonly ToolStrip _manualToolbar;
+    private readonly FlowLayoutPanel _actionPanel;
+    private readonly Button _openDocumentButton;
+    private readonly Button _fullscreenButton;
 
     private readonly Queue<int> _thumbnailRenderQueue = new();
     private readonly System.Windows.Forms.Timer _thumbnailRenderTimer;
@@ -47,8 +52,14 @@ public sealed class MainForm : Form
     private bool _isFormFillMode;
     private bool _isSwitchingFormMode;
     private bool _previewWasVisibleBeforeFormMode = true;
-    private bool _formFillHintShown;
+    private bool _formFillHintShown = true;
     private bool _xfaCompatibilityHintShown;
+    private bool _isWindowInWebViewFullscreen;
+    private bool _isFullscreenOwnedByWebViewElement;
+    private FormBorderStyle _windowBorderStyleBeforeWebViewFullscreen;
+    private FormWindowState _windowStateBeforeWebViewFullscreen;
+    private Rectangle _windowBoundsBeforeWebViewFullscreen;
+    private bool _windowTopMostBeforeWebViewFullscreen;
     private PdfFormHint _currentDocumentFormHint = PdfFormHint.None;
 
     public MainForm(string? startupPath)
@@ -60,20 +71,33 @@ public sealed class MainForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         KeyPreview = true;
         AllowDrop = true;
+        _windowBorderStyleBeforeWebViewFullscreen = FormBorderStyle;
+        _windowStateBeforeWebViewFullscreen = WindowState;
+        _windowBoundsBeforeWebViewFullscreen = Bounds;
+        _windowTopMostBeforeWebViewFullscreen = TopMost;
 
-        var toolbar = BuildToolbar();
+        _manualToolbar = BuildToolbar();
         _layoutContainer = BuildLayoutContainer();
         _thumbnailImageList = BuildThumbnailImageList();
         _thumbnailListView = BuildThumbnailListView();
         _pdfViewer = BuildPdfViewer();
         _formWebView = BuildFormWebView();
+        _actionPanel = BuildActionPanel();
+        _openDocumentButton = CreateActionButton("Abrir");
+        _fullscreenButton = CreateActionButton("Tela cheia");
+        _actionPanel.Controls.Add(_openDocumentButton);
+        _actionPanel.Controls.Add(_fullscreenButton);
 
         _layoutContainer.Panel1.Controls.Add(_thumbnailListView);
         _layoutContainer.Panel2.Controls.Add(_formWebView);
         _layoutContainer.Panel2.Controls.Add(_pdfViewer);
 
         Controls.Add(_layoutContainer);
-        Controls.Add(toolbar);
+        Controls.Add(_manualToolbar);
+        Controls.Add(_actionPanel);
+        _manualToolbar.Visible = false;
+        _actionPanel.Visible = false;
+        PositionActionPanel();
 
         _thumbnailRenderTimer = new System.Windows.Forms.Timer { Interval = 1 };
         _thumbnailRenderTimer.Tick += (_, _) => RenderNextThumbnail();
@@ -121,13 +145,20 @@ public sealed class MainForm : Form
             case Keys.Control | Keys.P:
                 _ = PrintCurrentDocumentAsync();
                 return true;
-            case Keys.Control | Keys.E:
-                _ = ToggleFormFillModeFromShortcutAsync();
+            case Keys.F11:
+                ToggleHostFullscreen();
                 return true;
         }
 
         if (_isFormFillMode)
         {
+            if (keyData == Keys.Escape)
+            {
+                ExitFormWebViewFullscreenIfNeeded();
+                _formWebView.Focus();
+                return true;
+            }
+
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
@@ -312,10 +343,45 @@ public sealed class MainForm : Form
         };
     }
 
+    private static FlowLayoutPanel BuildActionPanel()
+    {
+        return new FlowLayoutPanel
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            BackColor = Color.FromArgb(245, 245, 245),
+            Padding = new Padding(6),
+            BorderStyle = BorderStyle.FixedSingle
+        };
+    }
+
+    private static Button CreateActionButton(string text)
+    {
+        return new Button
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Padding = new Padding(10, 6, 10, 6),
+            Text = text,
+            FlatStyle = FlatStyle.System
+        };
+    }
+
+    private void PositionActionPanel()
+    {
+        const int margin = 10;
+        _actionPanel.Location = new Point(Math.Max(margin, ClientSize.Width - _actionPanel.Width - margin), margin);
+        _actionPanel.BringToFront();
+    }
+
     private void HookEvents()
     {
+        _openDocumentButton.Click += (_, _) => OpenDocumentFromDialog();
         _openButton.Click += (_, _) => OpenDocumentFromDialog();
         _formFillButton.Click += async (_, _) => await ToggleFormFillModeAsync();
+        _fullscreenButton.Click += (_, _) => ToggleHostFullscreen();
         _togglePreviewButton.Click += (_, _) => TogglePreviewPanel();
         _previousPageButton.Click += (_, _) => GoToPage((_pdfViewer.Document == null ? 1 : _pdfViewer.Renderer.Page + 1) - 1);
         _nextPageButton.Click += (_, _) => GoToPage((_pdfViewer.Document == null ? 1 : _pdfViewer.Renderer.Page + 1) + 1);
@@ -338,6 +404,7 @@ public sealed class MainForm : Form
 
         DragEnter += MainFormOnDragEnter;
         DragDrop += MainFormOnDragDrop;
+        Resize += (_, _) => PositionActionPanel();
     }
 
     private void MainFormOnDragEnter(object? sender, DragEventArgs e)
@@ -793,17 +860,6 @@ public sealed class MainForm : Form
         }
     }
 
-    private async Task ToggleFormFillModeFromShortcutAsync()
-    {
-        if (_document == null)
-        {
-            return;
-        }
-
-        _formFillButton.Checked = !_formFillButton.Checked;
-        await ToggleFormFillModeAsync();
-    }
-
     private async Task ToggleFormFillModeAsync()
     {
         if (_isSwitchingFormMode)
@@ -850,6 +906,7 @@ public sealed class MainForm : Form
         }
 
         _isFormFillMode = true;
+        KeyPreview = false;
         _previewWasVisibleBeforeFormMode = _togglePreviewButton.Checked;
         _togglePreviewButton.Checked = false;
         _layoutContainer.Panel1Collapsed = true;
@@ -891,10 +948,13 @@ public sealed class MainForm : Form
     {
         if (!_isFormFillMode)
         {
+            ExitFormWebViewFullscreenIfNeeded();
             return;
         }
 
+        ExitFormWebViewFullscreenIfNeeded();
         _isFormFillMode = false;
+        KeyPreview = true;
         _thumbnailListView.Enabled = true;
 
         _formWebView.Visible = false;
@@ -936,7 +996,7 @@ public sealed class MainForm : Form
 
     private async Task AutoEnableFormFillModeIfNeededAsync()
     {
-        if (_document == null || _isFormFillMode || _currentDocumentFormHint == PdfFormHint.None)
+        if (_document == null || _isFormFillMode)
         {
             return;
         }
@@ -960,6 +1020,7 @@ public sealed class MainForm : Form
     {
         if (_formWebView.CoreWebView2 != null)
         {
+            ConfigureFormWebView();
             return true;
         }
 
@@ -970,7 +1031,7 @@ public sealed class MainForm : Form
 
             if (_formWebView.CoreWebView2 != null)
             {
-                _formWebView.CoreWebView2.Settings.AreDevToolsEnabled = false;
+                ConfigureFormWebView();
             }
 
             return _formWebView.CoreWebView2 != null;
@@ -990,6 +1051,121 @@ public sealed class MainForm : Form
         {
             UseWaitCursor = false;
         }
+    }
+
+    private void ConfigureFormWebView()
+    {
+        if (_formWebView.CoreWebView2 == null)
+        {
+            return;
+        }
+
+        _formWebView.CoreWebView2.Settings.AreDevToolsEnabled = false;
+        _formWebView.CoreWebView2.Settings.AreBrowserAcceleratorKeysEnabled = false;
+        _formWebView.CoreWebView2.Settings.HiddenPdfToolbarItems =
+            _formWebView.CoreWebView2.Settings.HiddenPdfToolbarItems |
+            CoreWebView2PdfToolbarItems.FullScreen |
+            CoreWebView2PdfToolbarItems.MoreSettings;
+        _formWebView.CoreWebView2.ContainsFullScreenElementChanged -= FormWebViewOnContainsFullScreenElementChanged;
+        _formWebView.CoreWebView2.ContainsFullScreenElementChanged += FormWebViewOnContainsFullScreenElementChanged;
+    }
+
+    private void FormWebViewOnContainsFullScreenElementChanged(object? sender, object e)
+    {
+        if (_formWebView.CoreWebView2?.ContainsFullScreenElement == true)
+        {
+            _isFullscreenOwnedByWebViewElement = true;
+            EnterNativeFullscreenForWebView();
+            return;
+        }
+
+        if (!_isFullscreenOwnedByWebViewElement)
+        {
+            return;
+        }
+
+        _isFullscreenOwnedByWebViewElement = false;
+        ExitNativeFullscreenForWebView();
+    }
+
+    private void ToggleHostFullscreen()
+    {
+        _isFullscreenOwnedByWebViewElement = false;
+
+        if (_isWindowInWebViewFullscreen)
+        {
+            ExitFormWebViewFullscreenIfNeeded();
+            return;
+        }
+
+        EnterNativeFullscreenForWebView();
+    }
+
+    private void EnterNativeFullscreenForWebView()
+    {
+        if (_isWindowInWebViewFullscreen)
+        {
+            return;
+        }
+
+        _windowBorderStyleBeforeWebViewFullscreen = FormBorderStyle;
+        _windowStateBeforeWebViewFullscreen = WindowState;
+        _windowBoundsBeforeWebViewFullscreen = Bounds;
+        _windowTopMostBeforeWebViewFullscreen = TopMost;
+
+        FormBorderStyle = FormBorderStyle.None;
+        WindowState = FormWindowState.Normal;
+        Bounds = Screen.FromControl(this).Bounds;
+        TopMost = true;
+        WindowState = FormWindowState.Maximized;
+        _isWindowInWebViewFullscreen = true;
+        _fullscreenButton.Text = "Sair da tela cheia";
+        PositionActionPanel();
+    }
+
+    private void ExitNativeFullscreenForWebView()
+    {
+        if (!_isWindowInWebViewFullscreen)
+        {
+            return;
+        }
+
+        TopMost = _windowTopMostBeforeWebViewFullscreen;
+        FormBorderStyle = _windowBorderStyleBeforeWebViewFullscreen;
+
+        if (_windowStateBeforeWebViewFullscreen == FormWindowState.Normal)
+        {
+            WindowState = FormWindowState.Normal;
+            Bounds = _windowBoundsBeforeWebViewFullscreen;
+        }
+        else
+        {
+            WindowState = _windowStateBeforeWebViewFullscreen;
+        }
+
+        _isWindowInWebViewFullscreen = false;
+        _fullscreenButton.Text = "Tela cheia";
+        PositionActionPanel();
+    }
+
+    private void ExitFormWebViewFullscreenIfNeeded()
+    {
+        _isFullscreenOwnedByWebViewElement = false;
+        var core = _formWebView.CoreWebView2;
+
+        if (core?.ContainsFullScreenElement == true)
+        {
+            _ = core.ExecuteScriptAsync("if (document.fullscreenElement) { document.exitFullscreen(); }");
+        }
+
+        if (core != null)
+        {
+            _ = core.ExecuteScriptAsync(
+                "try { if (typeof PDFViewerApplication !== 'undefined' && PDFViewerApplication.pdfPresentationMode?.active) { PDFViewerApplication.pdfPresentationMode.exit(); } } catch (_) { }"
+            );
+        }
+
+        ExitNativeFullscreenForWebView();
     }
 
     private string BuildDocumentViewerUrl(int pageNumber)
@@ -1060,6 +1236,9 @@ public sealed class MainForm : Form
         _printButton.Enabled = false;
         _formFillButton.Enabled = false;
         _thumbnailListView.Enabled = false;
+        _actionPanel.Visible = true;
+        _fullscreenButton.Enabled = true;
+        PositionActionPanel();
     }
 
     private void UpdateViewState(bool force = false)
@@ -1067,6 +1246,14 @@ public sealed class MainForm : Form
         if (_syncingUi)
         {
             return;
+        }
+
+        if (_isFullscreenOwnedByWebViewElement &&
+            _isWindowInWebViewFullscreen &&
+            _formWebView.CoreWebView2?.ContainsFullScreenElement != true)
+        {
+            _isFullscreenOwnedByWebViewElement = false;
+            ExitNativeFullscreenForWebView();
         }
 
         if (_document == null || _document.PageCount == 0)
@@ -1099,6 +1286,8 @@ public sealed class MainForm : Form
         _printButton.Enabled = true;
         _formFillButton.Enabled = true;
         _thumbnailListView.Enabled = !_isFormFillMode;
+        _actionPanel.Visible = true;
+        PositionActionPanel();
     }
 
     private void SelectThumbnail(int pageIndex)
