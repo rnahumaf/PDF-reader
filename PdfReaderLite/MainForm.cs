@@ -1,66 +1,22 @@
-using System.Drawing.Drawing2D;
 using System.Globalization;
-using System.Text;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
-using PdfiumViewer;
 
 namespace PdfReaderLite;
 
 public sealed class MainForm : Form
 {
-    private enum PdfFormHint
-    {
-        None,
-        AcroForm,
-        Xfa
-    }
-
-    private const int ThumbnailWidth = 130;
-    private const int ThumbnailHeight = 180;
     private const string AppTitle = "PDF Reader Lite";
 
-    private ToolStripButton _openButton = null!;
-    private ToolStripButton _togglePreviewButton = null!;
-    private ToolStripButton _previousPageButton = null!;
-    private ToolStripTextBox _pageTextBox = null!;
-    private ToolStripLabel _pageCountLabel = null!;
-    private ToolStripButton _nextPageButton = null!;
-    private ToolStripButton _zoomOutButton = null!;
-    private ToolStripComboBox _zoomComboBox = null!;
-    private ToolStripButton _zoomInButton = null!;
-    private ToolStripButton _printButton = null!;
-    private ToolStripButton _formFillButton = null!;
-
-    private readonly SplitContainer _layoutContainer;
-    private readonly ListView _thumbnailListView;
-    private readonly ImageList _thumbnailImageList;
-    private readonly PdfViewer _pdfViewer;
-    private readonly WebView2 _formWebView;
-    private readonly ToolStrip _manualToolbar;
-    private readonly FlowLayoutPanel _actionPanel;
-    private readonly Button _openDocumentButton;
-    private readonly Button _fullscreenButton;
-
-    private readonly Queue<int> _thumbnailRenderQueue = new();
-    private readonly System.Windows.Forms.Timer _thumbnailRenderTimer;
-    private readonly System.Windows.Forms.Timer _viewStateTimer;
-
-    private PdfDocument? _document;
+    private readonly WebView2 _pdfWebView;
     private string? _loadedFilePath;
-    private bool _syncingUi;
-    private bool _isFormFillMode;
-    private bool _isSwitchingFormMode;
-    private bool _previewWasVisibleBeforeFormMode = true;
-    private bool _formFillHintShown = true;
-    private bool _xfaCompatibilityHintShown;
+    private bool _isOpeningDocument;
     private bool _isWindowInWebViewFullscreen;
     private bool _isFullscreenOwnedByWebViewElement;
     private FormBorderStyle _windowBorderStyleBeforeWebViewFullscreen;
     private FormWindowState _windowStateBeforeWebViewFullscreen;
     private Rectangle _windowBoundsBeforeWebViewFullscreen;
     private bool _windowTopMostBeforeWebViewFullscreen;
-    private PdfFormHint _currentDocumentFormHint = PdfFormHint.None;
 
     public MainForm(string? startupPath)
     {
@@ -71,65 +27,34 @@ public sealed class MainForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         KeyPreview = true;
         AllowDrop = true;
+
         _windowBorderStyleBeforeWebViewFullscreen = FormBorderStyle;
         _windowStateBeforeWebViewFullscreen = WindowState;
         _windowBoundsBeforeWebViewFullscreen = Bounds;
         _windowTopMostBeforeWebViewFullscreen = TopMost;
 
-        _manualToolbar = BuildToolbar();
-        _layoutContainer = BuildLayoutContainer();
-        _thumbnailImageList = BuildThumbnailImageList();
-        _thumbnailListView = BuildThumbnailListView();
-        _pdfViewer = BuildPdfViewer();
-        _formWebView = BuildFormWebView();
-        _actionPanel = BuildActionPanel();
-        _openDocumentButton = CreateActionButton("Abrir");
-        _fullscreenButton = CreateActionButton("Tela cheia");
-        _actionPanel.Controls.Add(_openDocumentButton);
-        _actionPanel.Controls.Add(_fullscreenButton);
-
-        _layoutContainer.Panel1.Controls.Add(_thumbnailListView);
-        _layoutContainer.Panel2.Controls.Add(_formWebView);
-        _layoutContainer.Panel2.Controls.Add(_pdfViewer);
-
-        Controls.Add(_layoutContainer);
-        Controls.Add(_manualToolbar);
-        Controls.Add(_actionPanel);
-        _manualToolbar.Visible = false;
-        _actionPanel.Visible = false;
-        PositionActionPanel();
-
-        _thumbnailRenderTimer = new System.Windows.Forms.Timer { Interval = 1 };
-        _thumbnailRenderTimer.Tick += (_, _) => RenderNextThumbnail();
-
-        _viewStateTimer = new System.Windows.Forms.Timer { Interval = 120 };
-        _viewStateTimer.Tick += (_, _) => UpdateViewState();
-        _viewStateTimer.Start();
+        _pdfWebView = BuildPdfWebView();
+        Controls.Add(_pdfWebView);
 
         HookEvents();
-        ApplyEmptyState();
 
-        if (!string.IsNullOrWhiteSpace(startupPath))
+        Shown += (_, _) =>
         {
-            Shown += (_, _) => OpenDocument(startupPath);
-        }
+            if (!string.IsNullOrWhiteSpace(startupPath))
+            {
+                OpenDocument(startupPath);
+                return;
+            }
+
+            OpenDocumentFromDialog();
+        };
     }
 
     protected override void Dispose(bool disposing)
     {
         if (disposing)
         {
-            _thumbnailRenderTimer.Stop();
-            _viewStateTimer.Stop();
-            _thumbnailRenderTimer.Dispose();
-            _viewStateTimer.Dispose();
-
-            _pdfViewer.Document = null;
-            _document?.Dispose();
-            _document = null;
-            _formWebView.Dispose();
-
-            DisposeThumbnailImages();
+            _pdfWebView.Dispose();
         }
 
         base.Dispose(disposing);
@@ -142,269 +67,46 @@ public sealed class MainForm : Form
             case Keys.Control | Keys.O:
                 OpenDocumentFromDialog();
                 return true;
+            case Keys.Control | Keys.S:
+            case Keys.Control | Keys.Shift | Keys.S:
+                _ = ShowNativeSaveUiAsync();
+                return true;
+            case Keys.Control | Keys.I:
+                ShowCurrentDocumentInfo();
+                return true;
             case Keys.Control | Keys.P:
                 _ = PrintCurrentDocumentAsync();
                 return true;
             case Keys.F11:
                 ToggleHostFullscreen();
                 return true;
-        }
+            case Keys.Escape:
+                if (_isWindowInWebViewFullscreen || _pdfWebView.CoreWebView2?.ContainsFullScreenElement == true)
+                {
+                    ExitWebViewFullscreenIfNeeded();
+                    _pdfWebView.Focus();
+                    return true;
+                }
 
-        if (_isFormFillMode)
-        {
-            if (keyData == Keys.Escape)
-            {
-                ExitFormWebViewFullscreenIfNeeded();
-                _formWebView.Focus();
-                return true;
-            }
-
-            return base.ProcessCmdKey(ref msg, keyData);
-        }
-
-        switch (keyData)
-        {
-            case Keys.Control | Keys.Oemplus:
-            case Keys.Control | Keys.Add:
-                ZoomIn();
-                return true;
-            case Keys.Control | Keys.OemMinus:
-            case Keys.Control | Keys.Subtract:
-                ZoomOut();
-                return true;
-            case Keys.Control | Keys.D0:
-            case Keys.Control | Keys.NumPad0:
-                SetZoomMode(PdfViewerZoomMode.FitBest);
-                return true;
-            case Keys.Control | Keys.D1:
-            case Keys.Control | Keys.NumPad1:
-                SetZoomMode(PdfViewerZoomMode.FitWidth);
-                return true;
-            case Keys.PageUp:
-            case Keys.Left:
-            case Keys.Up:
-                GoToPage((_pdfViewer.Document == null ? 1 : _pdfViewer.Renderer.Page + 1) - 1);
-                return true;
-            case Keys.PageDown:
-            case Keys.Right:
-            case Keys.Down:
-                GoToPage((_pdfViewer.Document == null ? 1 : _pdfViewer.Renderer.Page + 1) + 1);
-                return true;
+                break;
         }
 
         return base.ProcessCmdKey(ref msg, keyData);
     }
 
-    private ToolStrip BuildToolbar()
-    {
-        var toolbarHeight = Math.Max(52, (int)Math.Ceiling(Font.GetHeight() + 30));
-
-        var toolbar = new ToolStrip
-        {
-            Dock = DockStyle.Top,
-            GripStyle = ToolStripGripStyle.Hidden,
-            AutoSize = false,
-            Height = toolbarHeight,
-            Padding = new Padding(8, 8, 8, 8),
-            BackColor = Color.FromArgb(245, 245, 245)
-        };
-
-        _openButton = CreateTextButton("Abrir", "Ctrl+O");
-        _formFillButton = CreateTextButton("Formulario", "Ctrl+E");
-        _formFillButton.CheckOnClick = true;
-        _togglePreviewButton = CreateTextButton("Preview", "Mostrar/Ocultar miniaturas");
-        _togglePreviewButton.CheckOnClick = true;
-        _togglePreviewButton.Checked = true;
-
-        _previousPageButton = CreateTextButton("Anterior", "PgUp");
-        _pageTextBox = new ToolStripTextBox
-        {
-            AutoSize = false,
-            Size = new Size(56, 28),
-            Text = "0",
-            TextBoxTextAlign = HorizontalAlignment.Center
-        };
-        _pageCountLabel = new ToolStripLabel("/ 0");
-        _nextPageButton = CreateTextButton("Proxima", "PgDn");
-
-        _zoomOutButton = CreateTextButton("-", "Ctrl+-");
-        _zoomComboBox = new ToolStripComboBox
-        {
-            AutoSize = false,
-            Size = new Size(132, 28),
-            DropDownStyle = ComboBoxStyle.DropDown
-        };
-        _zoomComboBox.Items.AddRange(
-        [
-            "Ajustar largura",
-            "Ajustar pagina",
-            "50%",
-            "75%",
-            "100%",
-            "125%",
-            "150%",
-            "200%"
-        ]);
-        _zoomComboBox.Text = "Ajustar largura";
-        _zoomInButton = CreateTextButton("+", "Ctrl++");
-        _printButton = CreateTextButton("Imprimir", "Ctrl+P");
-
-        toolbar.Items.AddRange(
-        [
-            _openButton,
-            new ToolStripSeparator(),
-            _formFillButton,
-            new ToolStripSeparator(),
-            _togglePreviewButton,
-            new ToolStripSeparator(),
-            _previousPageButton,
-            _pageTextBox,
-            _pageCountLabel,
-            _nextPageButton,
-            new ToolStripSeparator(),
-            _zoomOutButton,
-            _zoomComboBox,
-            _zoomInButton,
-            new ToolStripSeparator(),
-            _printButton
-        ]);
-
-        return toolbar;
-    }
-
-    private static ToolStripButton CreateTextButton(string text, string tooltip)
-    {
-        return new ToolStripButton(text)
-        {
-            DisplayStyle = ToolStripItemDisplayStyle.Text,
-            AutoSize = true,
-            Margin = new Padding(2, 1, 2, 1),
-            ToolTipText = tooltip
-        };
-    }
-
-    private static SplitContainer BuildLayoutContainer()
-    {
-        return new SplitContainer
-        {
-            Dock = DockStyle.Fill,
-            FixedPanel = FixedPanel.Panel1,
-            SplitterDistance = 230,
-            Panel1MinSize = 190,
-            SplitterWidth = 6
-        };
-    }
-
-    private static ImageList BuildThumbnailImageList()
-    {
-        return new ImageList
-        {
-            ColorDepth = ColorDepth.Depth32Bit,
-            ImageSize = new Size(ThumbnailWidth, ThumbnailHeight)
-        };
-    }
-
-    private ListView BuildThumbnailListView()
-    {
-        var listView = new ListView
-        {
-            Dock = DockStyle.Fill,
-            View = View.LargeIcon,
-            LargeImageList = _thumbnailImageList,
-            MultiSelect = false,
-            HideSelection = false,
-            UseCompatibleStateImageBehavior = false,
-            BackColor = Color.FromArgb(250, 250, 250)
-        };
-
-        return listView;
-    }
-
-    private static PdfViewer BuildPdfViewer()
-    {
-        var viewer = new PdfViewer
-        {
-            Dock = DockStyle.Fill,
-            ShowToolbar = false,
-            ShowBookmarks = false
-        };
-
-        viewer.Renderer.BackColor = Color.FromArgb(45, 45, 45);
-
-        return viewer;
-    }
-
-    private static WebView2 BuildFormWebView()
+    private static WebView2 BuildPdfWebView()
     {
         return new WebView2
         {
-            Dock = DockStyle.Fill,
-            Visible = false
+            Dock = DockStyle.Fill
         };
-    }
-
-    private static FlowLayoutPanel BuildActionPanel()
-    {
-        return new FlowLayoutPanel
-        {
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = false,
-            BackColor = Color.FromArgb(245, 245, 245),
-            Padding = new Padding(6),
-            BorderStyle = BorderStyle.FixedSingle
-        };
-    }
-
-    private static Button CreateActionButton(string text)
-    {
-        return new Button
-        {
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Padding = new Padding(10, 6, 10, 6),
-            Text = text,
-            FlatStyle = FlatStyle.System
-        };
-    }
-
-    private void PositionActionPanel()
-    {
-        const int margin = 10;
-        _actionPanel.Location = new Point(Math.Max(margin, ClientSize.Width - _actionPanel.Width - margin), margin);
-        _actionPanel.BringToFront();
     }
 
     private void HookEvents()
     {
-        _openDocumentButton.Click += (_, _) => OpenDocumentFromDialog();
-        _openButton.Click += (_, _) => OpenDocumentFromDialog();
-        _formFillButton.Click += async (_, _) => await ToggleFormFillModeAsync();
-        _fullscreenButton.Click += (_, _) => ToggleHostFullscreen();
-        _togglePreviewButton.Click += (_, _) => TogglePreviewPanel();
-        _previousPageButton.Click += (_, _) => GoToPage((_pdfViewer.Document == null ? 1 : _pdfViewer.Renderer.Page + 1) - 1);
-        _nextPageButton.Click += (_, _) => GoToPage((_pdfViewer.Document == null ? 1 : _pdfViewer.Renderer.Page + 1) + 1);
-        _zoomOutButton.Click += (_, _) => ZoomOut();
-        _zoomInButton.Click += (_, _) => ZoomIn();
-        _printButton.Click += async (_, _) => await PrintCurrentDocumentAsync();
-
-        _pageTextBox.KeyDown += PageTextBoxOnKeyDown;
-        _pageTextBox.Leave += (_, _) => GoToTypedPage();
-
-        _zoomComboBox.SelectedIndexChanged += (_, _) => ApplyZoomFromComboBox();
-        _zoomComboBox.KeyDown += ZoomComboBoxOnKeyDown;
-        _zoomComboBox.Leave += (_, _) => ApplyZoomFromComboBox();
-
-        _thumbnailListView.SelectedIndexChanged += ThumbnailListViewOnSelectedIndexChanged;
-
-        _pdfViewer.Renderer.Scroll += (_, _) => UpdateViewState();
-        _pdfViewer.Renderer.DisplayRectangleChanged += (_, _) => UpdateViewState();
-        _pdfViewer.Renderer.ZoomChanged += (_, _) => UpdateViewState(force: true);
-
         DragEnter += MainFormOnDragEnter;
         DragDrop += MainFormOnDragDrop;
-        Resize += (_, _) => PositionActionPanel();
+        _pdfWebView.KeyDown += PdfWebViewOnKeyDown;
     }
 
     private void MainFormOnDragEnter(object? sender, DragEventArgs e)
@@ -425,7 +127,8 @@ public sealed class MainForm : Form
             return;
         }
 
-        var firstPdf = files.FirstOrDefault(path => string.Equals(Path.GetExtension(path), ".pdf", StringComparison.OrdinalIgnoreCase));
+        var firstPdf = files.FirstOrDefault(path =>
+            string.Equals(Path.GetExtension(path), ".pdf", StringComparison.OrdinalIgnoreCase));
 
         if (firstPdf != null)
         {
@@ -452,390 +155,207 @@ public sealed class MainForm : Form
 
     private void OpenDocument(string? filePath)
     {
-        if (string.IsNullOrWhiteSpace(filePath))
+        _ = OpenDocumentAsync(filePath);
+    }
+
+    private async Task OpenDocumentAsync(string? filePath)
+    {
+        if (_isOpeningDocument || string.IsNullOrWhiteSpace(filePath))
         {
             return;
         }
 
         var normalizedPath = Path.GetFullPath(filePath);
-
         if (!File.Exists(normalizedPath))
         {
             MessageBox.Show(this, $"Arquivo nao encontrado:\n{normalizedPath}", AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
-        PdfDocument? loadedDocument = null;
+        _isOpeningDocument = true;
 
         try
         {
             UseWaitCursor = true;
-            loadedDocument = PdfDocument.Load(normalizedPath);
+
+            if (!await EnsurePdfWebViewReadyAsync() || _pdfWebView.CoreWebView2 == null)
+            {
+                return;
+            }
+
+            _loadedFilePath = normalizedPath;
+            Text = $"{Path.GetFileName(normalizedPath)} - {AppTitle}";
+
+            _pdfWebView.CoreWebView2.Navigate(BuildDocumentViewerUrl(1));
+            _pdfWebView.BringToFront();
+            _pdfWebView.Focus();
         }
         catch (Exception ex)
         {
             MessageBox.Show(this, $"Nao foi possivel abrir o PDF.\n\n{ex.Message}", AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Error);
-            loadedDocument?.Dispose();
+        }
+        finally
+        {
+            UseWaitCursor = false;
+            _isOpeningDocument = false;
+        }
+    }
+
+    private async Task ShowNativeSaveUiAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_loadedFilePath))
+        {
             return;
+        }
+
+        if (!await EnsurePdfWebViewReadyAsync() || _pdfWebView.CoreWebView2 == null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _pdfWebView.CoreWebView2.ShowSaveAsUIAsync();
+        }
+        catch
+        {
+            await SaveDocumentAsAsync();
+        }
+    }
+
+    private async Task SaveDocumentAsAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_loadedFilePath))
+        {
+            MessageBox.Show(this, "Nenhum PDF aberto para salvar.", AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var defaultName = $"{Path.GetFileNameWithoutExtension(_loadedFilePath)}-copia.pdf";
+
+        using var dialog = new SaveFileDialog
+        {
+            Title = "Salvar PDF como",
+            Filter = "Arquivos PDF (*.pdf)|*.pdf|Todos os arquivos (*.*)|*.*",
+            CheckPathExists = true,
+            AddExtension = true,
+            DefaultExt = "pdf",
+            OverwritePrompt = true,
+            FileName = defaultName
+        };
+
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            return;
+        }
+
+        var destinationPath = Path.GetFullPath(dialog.FileName);
+        if (string.Equals(destinationPath, _loadedFilePath, StringComparison.OrdinalIgnoreCase))
+        {
+            MessageBox.Show(this, "Escolha outro nome para criar um novo arquivo.", AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        try
+        {
+            UseWaitCursor = true;
+
+            if (await TrySaveFromWebViewAsync(destinationPath))
+            {
+                return;
+            }
+
+            File.Copy(_loadedFilePath, destinationPath, overwrite: true);
+            MessageBox.Show(
+                this,
+                "Nao foi possivel exportar a versao atual da visualizacao.\nFoi criada uma copia do arquivo original.",
+                AppTitle,
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning
+            );
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Nao foi possivel salvar o PDF.\n\n{ex.Message}", AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
         {
             UseWaitCursor = false;
         }
-
-        var oldDocument = _document;
-        _document = loadedDocument;
-        _pdfViewer.Document = loadedDocument;
-        oldDocument?.Dispose();
-
-        _loadedFilePath = normalizedPath;
-        Text = $"{Path.GetFileName(normalizedPath)} - {AppTitle}";
-        _currentDocumentFormHint = DetectFormHint(normalizedPath);
-
-        if (_document.PageCount > 0)
-        {
-            SetZoomMode(PdfViewerZoomMode.FitWidth);
-            _pdfViewer.Renderer.Page = 0;
-        }
-
-        RebuildThumbnailList();
-
-        if (_isFormFillMode)
-        {
-            _ = ReloadFormModeDocumentAsync();
-        }
-        else
-        {
-            _ = AutoEnableFormFillModeIfNeededAsync();
-        }
-
-        UpdateViewState(force: true);
     }
 
-    private void RebuildThumbnailList()
+    private async Task<bool> TrySaveFromWebViewAsync(string destinationPath)
     {
-        _thumbnailRenderTimer.Stop();
-        _thumbnailRenderQueue.Clear();
-
-        _thumbnailListView.BeginUpdate();
-        _thumbnailListView.Items.Clear();
-        ResetThumbnailImageList();
-
-        if (_document != null)
-        {
-            for (var i = 0; i < _document.PageCount; i++)
-            {
-                var listViewItem = new ListViewItem((i + 1).ToString(CultureInfo.InvariantCulture), 0);
-                _thumbnailListView.Items.Add(listViewItem);
-                _thumbnailRenderQueue.Enqueue(i);
-            }
-        }
-
-        _thumbnailListView.EndUpdate();
-
-        if (_thumbnailRenderQueue.Count > 0)
-        {
-            _thumbnailRenderTimer.Start();
-        }
-    }
-
-    private void ResetThumbnailImageList()
-    {
-        DisposeThumbnailImages();
-        _thumbnailImageList.Images.Add(CreatePlaceholderThumbnail());
-    }
-
-    private void DisposeThumbnailImages()
-    {
-        foreach (Image image in _thumbnailImageList.Images)
-        {
-            image.Dispose();
-        }
-
-        _thumbnailImageList.Images.Clear();
-    }
-
-    private static Bitmap CreatePlaceholderThumbnail()
-    {
-        var bitmap = new Bitmap(ThumbnailWidth, ThumbnailHeight);
-
-        using var graphics = Graphics.FromImage(bitmap);
-        graphics.Clear(Color.FromArgb(242, 242, 242));
-        graphics.DrawRectangle(Pens.Gainsboro, 0, 0, ThumbnailWidth - 1, ThumbnailHeight - 1);
-
-        return bitmap;
-    }
-
-    private void RenderNextThumbnail()
-    {
-        if (_document == null || _thumbnailRenderQueue.Count == 0)
-        {
-            _thumbnailRenderTimer.Stop();
-            return;
-        }
-
-        var pageIndex = _thumbnailRenderQueue.Dequeue();
-
-        try
-        {
-            var thumbnail = CreateThumbnailForPage(pageIndex);
-            _thumbnailImageList.Images.Add(thumbnail);
-
-            var imageIndex = _thumbnailImageList.Images.Count - 1;
-            if (pageIndex >= 0 && pageIndex < _thumbnailListView.Items.Count)
-            {
-                _thumbnailListView.Items[pageIndex].ImageIndex = imageIndex;
-            }
-        }
-        catch
-        {
-            // Ignore thumbnail render failures to keep navigation available.
-        }
-    }
-
-    private Bitmap CreateThumbnailForPage(int pageIndex)
-    {
-        if (_document == null)
-        {
-            return CreatePlaceholderThumbnail();
-        }
-
-        var pageSize = _document.PageSizes[pageIndex];
-        var pageRatio = pageSize.Height <= 0 ? 1f : pageSize.Width / pageSize.Height;
-
-        var viewportWidth = ThumbnailWidth - 10;
-        var viewportHeight = ThumbnailHeight - 10;
-
-        int renderedWidth;
-        int renderedHeight;
-
-        if (pageRatio >= viewportWidth / (float)viewportHeight)
-        {
-            renderedWidth = viewportWidth;
-            renderedHeight = Math.Max(1, (int)Math.Round(renderedWidth / pageRatio));
-        }
-        else
-        {
-            renderedHeight = viewportHeight;
-            renderedWidth = Math.Max(1, (int)Math.Round(renderedHeight * pageRatio));
-        }
-
-        using var renderedPage = _document.Render(
-            pageIndex,
-            renderedWidth,
-            renderedHeight,
-            96,
-            96,
-            PdfRenderFlags.Annotations | PdfRenderFlags.CorrectFromDpi
-        );
-
-        var canvas = new Bitmap(ThumbnailWidth, ThumbnailHeight);
-
-        using var graphics = Graphics.FromImage(canvas);
-        graphics.Clear(Color.White);
-        graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
-
-        var drawX = (ThumbnailWidth - renderedWidth) / 2;
-        var drawY = (ThumbnailHeight - renderedHeight) / 2;
-        graphics.DrawImage(renderedPage, drawX, drawY, renderedWidth, renderedHeight);
-        graphics.DrawRectangle(Pens.Gainsboro, 0, 0, ThumbnailWidth - 1, ThumbnailHeight - 1);
-
-        return canvas;
-    }
-
-    private void ThumbnailListViewOnSelectedIndexChanged(object? sender, EventArgs e)
-    {
-        if (_syncingUi || _document == null || _thumbnailListView.SelectedIndices.Count == 0)
-        {
-            return;
-        }
-
-        var selectedPage = _thumbnailListView.SelectedIndices[0] + 1;
-        GoToPage(selectedPage);
-    }
-
-    private void GoToPage(int pageNumber)
-    {
-        if (_isFormFillMode || _document == null || _document.PageCount == 0)
-        {
-            return;
-        }
-
-        var clampedPage = Math.Clamp(pageNumber, 1, _document.PageCount);
-        _pdfViewer.Renderer.Page = clampedPage - 1;
-        UpdateViewState(force: true);
-    }
-
-    private void PageTextBoxOnKeyDown(object? sender, KeyEventArgs e)
-    {
-        if (e.KeyCode != Keys.Enter)
-        {
-            return;
-        }
-
-        e.SuppressKeyPress = true;
-        GoToTypedPage();
-    }
-
-    private void GoToTypedPage()
-    {
-        if (_document == null)
-        {
-            return;
-        }
-
-        if (!int.TryParse(_pageTextBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var pageNumber))
-        {
-            UpdateViewState(force: true);
-            return;
-        }
-
-        GoToPage(pageNumber);
-    }
-
-    private void ZoomComboBoxOnKeyDown(object? sender, KeyEventArgs e)
-    {
-        if (e.KeyCode != Keys.Enter)
-        {
-            return;
-        }
-
-        e.SuppressKeyPress = true;
-        ApplyZoomFromComboBox();
-    }
-
-    private void ApplyZoomFromComboBox()
-    {
-        if (_isFormFillMode || _document == null || _syncingUi)
-        {
-            return;
-        }
-
-        var input = _zoomComboBox.Text.Trim();
-
-        if (string.Equals(input, "Ajustar largura", StringComparison.OrdinalIgnoreCase))
-        {
-            SetZoomMode(PdfViewerZoomMode.FitWidth);
-            return;
-        }
-
-        if (string.Equals(input, "Ajustar pagina", StringComparison.OrdinalIgnoreCase))
-        {
-            SetZoomMode(PdfViewerZoomMode.FitBest);
-            return;
-        }
-
-        if (!TryParseZoom(input, out var zoom))
-        {
-            UpdateViewState(force: true);
-            return;
-        }
-
-        _pdfViewer.Renderer.Zoom = zoom;
-        UpdateViewState(force: true);
-    }
-
-    private void SetZoomMode(PdfViewerZoomMode mode)
-    {
-        if (_isFormFillMode || _document == null)
-        {
-            return;
-        }
-
-        _pdfViewer.ZoomMode = mode;
-
-        _syncingUi = true;
-        _zoomComboBox.Text = mode == PdfViewerZoomMode.FitWidth ? "Ajustar largura" : "Ajustar pagina";
-        _syncingUi = false;
-
-        UpdateViewState(force: true);
-    }
-
-    private void ZoomIn()
-    {
-        if (_isFormFillMode || _document == null)
-        {
-            return;
-        }
-
-        _pdfViewer.Renderer.ZoomIn();
-        UpdateViewState(force: true);
-    }
-
-    private void ZoomOut()
-    {
-        if (_isFormFillMode || _document == null)
-        {
-            return;
-        }
-
-        _pdfViewer.Renderer.ZoomOut();
-        UpdateViewState(force: true);
-    }
-
-    private static bool TryParseZoom(string input, out double zoom)
-    {
-        zoom = 1.0;
-        var normalized = input.Trim();
-
-        if (normalized.EndsWith('%'))
-        {
-            normalized = normalized[..^1];
-        }
-
-        if (!double.TryParse(normalized, NumberStyles.Float, CultureInfo.InvariantCulture, out var percentage))
+        if (!await EnsurePdfWebViewReadyAsync() || _pdfWebView.CoreWebView2 == null)
         {
             return false;
         }
 
-        zoom = Math.Clamp(percentage / 100.0, 0.2, 6.0);
-        return true;
+        try
+        {
+            var saved = await _pdfWebView.CoreWebView2.PrintToPdfAsync(destinationPath);
+            return saved && File.Exists(destinationPath);
+        }
+        catch
+        {
+            return false;
+        }
     }
 
-    private void TogglePreviewPanel()
+    private void ShowCurrentDocumentInfo()
     {
-        if (_isFormFillMode)
+        if (string.IsNullOrWhiteSpace(_loadedFilePath))
         {
-            _togglePreviewButton.Checked = false;
-            _layoutContainer.Panel1Collapsed = true;
+            MessageBox.Show(this, "Nenhum PDF aberto.", AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
-        var showPreview = _togglePreviewButton.Checked;
-        _layoutContainer.Panel1Collapsed = !showPreview;
+        var fileInfo = new FileInfo(_loadedFilePath);
+        var modifiedAt = fileInfo.Exists
+            ? fileInfo.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)
+            : "desconhecido";
+        var fileSize = fileInfo.Exists ? FormatFileSize(fileInfo.Length) : "desconhecido";
+
+        var details =
+            $"Arquivo: {Path.GetFileName(_loadedFilePath)}\n" +
+            $"Tamanho: {fileSize}\n" +
+            $"Modificado: {modifiedAt}\n" +
+            "Modo: WebView2 nativo\n\n" +
+            $"Caminho:\n{_loadedFilePath}";
+
+        MessageBox.Show(this, details, "Informacoes do arquivo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
+    private static string FormatFileSize(long bytes)
+    {
+        var units = new[] { "B", "KB", "MB", "GB", "TB" };
+        double value = Math.Max(0, bytes);
+        var unitIndex = 0;
+
+        while (value >= 1024 && unitIndex < units.Length - 1)
+        {
+            value /= 1024;
+            unitIndex++;
+        }
+
+        return $"{value:0.##} {units[unitIndex]}";
     }
 
     private async Task PrintCurrentDocumentAsync()
     {
-        if (_document == null)
+        if (string.IsNullOrWhiteSpace(_loadedFilePath))
         {
             return;
         }
 
-        if (_isFormFillMode)
-        {
-            await PrintFromFormWebViewAsync();
-            return;
-        }
-
-        using var printDocument = _document.CreatePrintDocument(PdfPrintMode.ShrinkToMargin);
-        printDocument.DocumentName = Path.GetFileName(_loadedFilePath ?? "documento.pdf");
-
-        using var printDialog = new PrintDialog
-        {
-            Document = printDocument,
-            AllowSomePages = true,
-            UseEXDialog = false
-        };
-
-        if (printDialog.ShowDialog(this) != DialogResult.OK)
+        if (!await EnsurePdfWebViewReadyAsync() || _pdfWebView.CoreWebView2 == null)
         {
             return;
         }
 
         try
         {
-            printDocument.Print();
+            await _pdfWebView.CoreWebView2.ExecuteScriptAsync("window.print();");
         }
         catch (Exception ex)
         {
@@ -843,236 +363,54 @@ public sealed class MainForm : Form
         }
     }
 
-    private async Task PrintFromFormWebViewAsync()
+    private async Task<bool> EnsurePdfWebViewReadyAsync()
     {
-        if (!await EnsureFormWebViewReadyAsync() || _formWebView.CoreWebView2 == null)
+        if (_pdfWebView.CoreWebView2 != null)
         {
-            return;
-        }
-
-        try
-        {
-            await _formWebView.CoreWebView2.ExecuteScriptAsync("window.print();");
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, $"Falha ao imprimir no modo de formulario.\n\n{ex.Message}", AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-    }
-
-    private async Task ToggleFormFillModeAsync()
-    {
-        if (_isSwitchingFormMode)
-        {
-            return;
-        }
-
-        _isSwitchingFormMode = true;
-
-        try
-        {
-            if (!_formFillButton.Checked)
-            {
-                ExitFormFillMode();
-                return;
-            }
-
-            if (_document == null)
-            {
-                _formFillButton.Checked = false;
-                return;
-            }
-
-            if (!await LoadCurrentDocumentInFormModeAsync())
-            {
-                _formFillButton.Checked = false;
-                ExitFormFillMode();
-                return;
-            }
-
-            EnterFormFillMode();
-        }
-        finally
-        {
-            _isSwitchingFormMode = false;
-        }
-    }
-
-    private void EnterFormFillMode()
-    {
-        if (_isFormFillMode)
-        {
-            return;
-        }
-
-        _isFormFillMode = true;
-        KeyPreview = false;
-        _previewWasVisibleBeforeFormMode = _togglePreviewButton.Checked;
-        _togglePreviewButton.Checked = false;
-        _layoutContainer.Panel1Collapsed = true;
-        _thumbnailListView.Enabled = false;
-
-        _pdfViewer.Visible = false;
-        _formWebView.Visible = true;
-        _formWebView.BringToFront();
-        _formWebView.Focus();
-
-        if (!_formFillHintShown)
-        {
-            _formFillHintShown = true;
-            MessageBox.Show(
-                this,
-                "Modo de formulario ativo.\nUse a barra nativa do visualizador para salvar o PDF preenchido.",
-                AppTitle,
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information
-            );
-        }
-
-        if (_currentDocumentFormHint == PdfFormHint.Xfa && !_xfaCompatibilityHintShown)
-        {
-            _xfaCompatibilityHintShown = true;
-            MessageBox.Show(
-                this,
-                "Este PDF usa formulario XFA. Alguns arquivos XFA podem abrir apenas em modo leitura no motor do Edge/WebView2.\nSe os campos seguirem bloqueados, abra no Adobe Acrobat Reader.",
-                AppTitle,
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning
-            );
-        }
-
-        UpdateViewState(force: true);
-    }
-
-    private void ExitFormFillMode()
-    {
-        if (!_isFormFillMode)
-        {
-            ExitFormWebViewFullscreenIfNeeded();
-            return;
-        }
-
-        ExitFormWebViewFullscreenIfNeeded();
-        _isFormFillMode = false;
-        KeyPreview = true;
-        _thumbnailListView.Enabled = true;
-
-        _formWebView.Visible = false;
-        _pdfViewer.Visible = true;
-        _pdfViewer.BringToFront();
-        _pdfViewer.Focus();
-
-        _togglePreviewButton.Checked = _previewWasVisibleBeforeFormMode;
-        _layoutContainer.Panel1Collapsed = !_previewWasVisibleBeforeFormMode;
-
-        UpdateViewState(force: true);
-    }
-
-    private async Task<bool> LoadCurrentDocumentInFormModeAsync()
-    {
-        if (string.IsNullOrWhiteSpace(_loadedFilePath))
-        {
-            return false;
-        }
-
-        if (!await EnsureFormWebViewReadyAsync() || _formWebView.CoreWebView2 == null)
-        {
-            return false;
-        }
-
-        var currentPage = _pdfViewer.Document == null ? 1 : _pdfViewer.Renderer.Page + 1;
-
-        try
-        {
-            _formWebView.CoreWebView2.Navigate(BuildDocumentViewerUrl(currentPage));
-            return true;
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, $"Nao foi possivel abrir o modo de formulario.\n\n{ex.Message}", AppTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return false;
-        }
-    }
-
-    private async Task AutoEnableFormFillModeIfNeededAsync()
-    {
-        if (_document == null || _isFormFillMode)
-        {
-            return;
-        }
-
-        _formFillButton.Checked = true;
-        await ToggleFormFillModeAsync();
-    }
-
-    private async Task ReloadFormModeDocumentAsync()
-    {
-        if (await LoadCurrentDocumentInFormModeAsync())
-        {
-            return;
-        }
-
-        _formFillButton.Checked = false;
-        ExitFormFillMode();
-    }
-
-    private async Task<bool> EnsureFormWebViewReadyAsync()
-    {
-        if (_formWebView.CoreWebView2 != null)
-        {
-            ConfigureFormWebView();
+            ConfigurePdfWebView();
             return true;
         }
 
         try
         {
-            UseWaitCursor = true;
-            await _formWebView.EnsureCoreWebView2Async();
+            await _pdfWebView.EnsureCoreWebView2Async();
 
-            if (_formWebView.CoreWebView2 != null)
+            if (_pdfWebView.CoreWebView2 != null)
             {
-                ConfigureFormWebView();
+                ConfigurePdfWebView();
             }
 
-            return _formWebView.CoreWebView2 != null;
+            return _pdfWebView.CoreWebView2 != null;
         }
         catch (Exception ex)
         {
             MessageBox.Show(
                 this,
-                "Nao foi possivel iniciar o modo de formulario.\nInstale/atualize o Microsoft Edge WebView2 Runtime.\n\n" + ex.Message,
+                "Nao foi possivel iniciar o visualizador PDF.\nInstale/atualize o Microsoft Edge WebView2 Runtime.\n\n" + ex.Message,
                 AppTitle,
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning
             );
             return false;
         }
-        finally
-        {
-            UseWaitCursor = false;
-        }
     }
 
-    private void ConfigureFormWebView()
+    private void ConfigurePdfWebView()
     {
-        if (_formWebView.CoreWebView2 == null)
+        if (_pdfWebView.CoreWebView2 == null)
         {
             return;
         }
 
-        _formWebView.CoreWebView2.Settings.AreDevToolsEnabled = false;
-        _formWebView.CoreWebView2.Settings.AreBrowserAcceleratorKeysEnabled = false;
-        _formWebView.CoreWebView2.Settings.HiddenPdfToolbarItems =
-            _formWebView.CoreWebView2.Settings.HiddenPdfToolbarItems |
-            CoreWebView2PdfToolbarItems.FullScreen |
-            CoreWebView2PdfToolbarItems.MoreSettings;
-        _formWebView.CoreWebView2.ContainsFullScreenElementChanged -= FormWebViewOnContainsFullScreenElementChanged;
-        _formWebView.CoreWebView2.ContainsFullScreenElementChanged += FormWebViewOnContainsFullScreenElementChanged;
+        _pdfWebView.CoreWebView2.Settings.AreDevToolsEnabled = false;
+        _pdfWebView.CoreWebView2.Settings.AreBrowserAcceleratorKeysEnabled = true;
+        _pdfWebView.CoreWebView2.ContainsFullScreenElementChanged -= PdfWebViewOnContainsFullScreenElementChanged;
+        _pdfWebView.CoreWebView2.ContainsFullScreenElementChanged += PdfWebViewOnContainsFullScreenElementChanged;
     }
 
-    private void FormWebViewOnContainsFullScreenElementChanged(object? sender, object e)
+    private void PdfWebViewOnContainsFullScreenElementChanged(object? sender, object e)
     {
-        if (_formWebView.CoreWebView2?.ContainsFullScreenElement == true)
+        if (_pdfWebView.CoreWebView2?.ContainsFullScreenElement == true)
         {
             _isFullscreenOwnedByWebViewElement = true;
             EnterNativeFullscreenForWebView();
@@ -1088,13 +426,35 @@ public sealed class MainForm : Form
         ExitNativeFullscreenForWebView();
     }
 
+    private void PdfWebViewOnKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.KeyCode == Keys.F11)
+        {
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            ToggleHostFullscreen();
+            return;
+        }
+
+        if (e.KeyCode != Keys.Escape ||
+            (!_isWindowInWebViewFullscreen && _pdfWebView.CoreWebView2?.ContainsFullScreenElement != true))
+        {
+            return;
+        }
+
+        e.Handled = true;
+        e.SuppressKeyPress = true;
+        ExitWebViewFullscreenIfNeeded();
+        _pdfWebView.Focus();
+    }
+
     private void ToggleHostFullscreen()
     {
         _isFullscreenOwnedByWebViewElement = false;
 
         if (_isWindowInWebViewFullscreen)
         {
-            ExitFormWebViewFullscreenIfNeeded();
+            ExitWebViewFullscreenIfNeeded();
             return;
         }
 
@@ -1119,8 +479,6 @@ public sealed class MainForm : Form
         TopMost = true;
         WindowState = FormWindowState.Maximized;
         _isWindowInWebViewFullscreen = true;
-        _fullscreenButton.Text = "Sair da tela cheia";
-        PositionActionPanel();
     }
 
     private void ExitNativeFullscreenForWebView()
@@ -1144,14 +502,12 @@ public sealed class MainForm : Form
         }
 
         _isWindowInWebViewFullscreen = false;
-        _fullscreenButton.Text = "Tela cheia";
-        PositionActionPanel();
     }
 
-    private void ExitFormWebViewFullscreenIfNeeded()
+    private void ExitWebViewFullscreenIfNeeded()
     {
         _isFullscreenOwnedByWebViewElement = false;
-        var core = _formWebView.CoreWebView2;
+        var core = _pdfWebView.CoreWebView2;
 
         if (core?.ContainsFullScreenElement == true)
         {
@@ -1178,129 +534,5 @@ public sealed class MainForm : Form
         };
 
         return builder.Uri.AbsoluteUri;
-    }
-
-    private static PdfFormHint DetectFormHint(string filePath)
-    {
-        const int maxBytesToScan = 2 * 1024 * 1024;
-
-        try
-        {
-            using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            var bytesToRead = (int)Math.Min(stream.Length, maxBytesToScan);
-            if (bytesToRead <= 0)
-            {
-                return PdfFormHint.None;
-            }
-
-            var buffer = new byte[bytesToRead];
-            _ = stream.Read(buffer, 0, bytesToRead);
-
-            var text = Encoding.ASCII.GetString(buffer);
-            if (text.Contains("/XFA", StringComparison.Ordinal))
-            {
-                return PdfFormHint.Xfa;
-            }
-
-            if (text.Contains("/AcroForm", StringComparison.Ordinal))
-            {
-                return PdfFormHint.AcroForm;
-            }
-        }
-        catch
-        {
-            // If probing fails, keep default reader mode.
-        }
-
-        return PdfFormHint.None;
-    }
-
-    private void ApplyEmptyState()
-    {
-        _formFillButton.Checked = false;
-        ExitFormFillMode();
-
-        _syncingUi = true;
-        _pageTextBox.Text = "0";
-        _pageCountLabel.Text = "/ 0";
-        _zoomComboBox.Text = "100%";
-        _syncingUi = false;
-
-        _previousPageButton.Enabled = false;
-        _nextPageButton.Enabled = false;
-        _pageTextBox.Enabled = false;
-        _zoomOutButton.Enabled = false;
-        _zoomInButton.Enabled = false;
-        _zoomComboBox.Enabled = false;
-        _togglePreviewButton.Enabled = false;
-        _printButton.Enabled = false;
-        _formFillButton.Enabled = false;
-        _thumbnailListView.Enabled = false;
-        _actionPanel.Visible = true;
-        _fullscreenButton.Enabled = true;
-        PositionActionPanel();
-    }
-
-    private void UpdateViewState(bool force = false)
-    {
-        if (_syncingUi)
-        {
-            return;
-        }
-
-        if (_isFullscreenOwnedByWebViewElement &&
-            _isWindowInWebViewFullscreen &&
-            _formWebView.CoreWebView2?.ContainsFullScreenElement != true)
-        {
-            _isFullscreenOwnedByWebViewElement = false;
-            ExitNativeFullscreenForWebView();
-        }
-
-        if (_document == null || _document.PageCount == 0)
-        {
-            ApplyEmptyState();
-            return;
-        }
-
-        var page = _pdfViewer.Renderer.Page + 1;
-        var zoomPercent = (int)Math.Round(_pdfViewer.Renderer.Zoom * 100);
-
-        _syncingUi = true;
-        _pageTextBox.Text = page.ToString(CultureInfo.InvariantCulture);
-        _pageCountLabel.Text = $"/ {_document.PageCount}";
-        _zoomComboBox.Text = _isFormFillMode ? "Modo formulario" : $"{zoomPercent}%";
-        _syncingUi = false;
-
-        if (!_isFormFillMode && (force || _thumbnailListView.SelectedIndices.Count == 0 || _thumbnailListView.SelectedIndices[0] != page - 1))
-        {
-            SelectThumbnail(page - 1);
-        }
-
-        _previousPageButton.Enabled = !_isFormFillMode && page > 1;
-        _nextPageButton.Enabled = !_isFormFillMode && page < _document.PageCount;
-        _pageTextBox.Enabled = !_isFormFillMode;
-        _zoomOutButton.Enabled = !_isFormFillMode;
-        _zoomInButton.Enabled = !_isFormFillMode;
-        _zoomComboBox.Enabled = !_isFormFillMode;
-        _togglePreviewButton.Enabled = !_isFormFillMode;
-        _printButton.Enabled = true;
-        _formFillButton.Enabled = true;
-        _thumbnailListView.Enabled = !_isFormFillMode;
-        _actionPanel.Visible = true;
-        PositionActionPanel();
-    }
-
-    private void SelectThumbnail(int pageIndex)
-    {
-        if (pageIndex < 0 || pageIndex >= _thumbnailListView.Items.Count)
-        {
-            return;
-        }
-
-        _syncingUi = true;
-        _thumbnailListView.SelectedIndices.Clear();
-        _thumbnailListView.Items[pageIndex].Selected = true;
-        _thumbnailListView.EnsureVisible(pageIndex);
-        _syncingUi = false;
     }
 }
